@@ -38,6 +38,7 @@ class IssueTrackingPlugin(Plugin):
     needs_auth_template = 'sentry/plugins/bases/issue/needs_auth.html'
     auth_provider = None
     can_unlink_issues = False
+    can_link_existing_issues = False
 
     def _get_group_body(self, request, group, event, **kwargs):
         result = []
@@ -112,6 +113,9 @@ class IssueTrackingPlugin(Plugin):
         """
         return self.new_issue_form(request.POST or None, initial=self.get_initial_form_data(request, group, event))
 
+    def get_link_existing_issue_form(self, request, group, event, **kwargs):
+        raise NotImplementedError
+
     def get_issue_url(self, group, issue_id, **kwargs):
         """
         Given an issue_id (string) return an absolute URL to the issue's details
@@ -180,40 +184,57 @@ class IssueTrackingPlugin(Plugin):
         event = group.get_latest_event()
         Event.objects.bind_nodes([event], 'data')
 
-        form = self.get_new_issue_form(request, group, event)
-        if form.is_valid():
-            try:
-                issue_id = self.create_issue(
+        op = request.POST.get('op', 'create')
+
+        create_form = self.get_new_issue_form(request, group, event)
+        link_form = None
+        if self.can_link_existing_issues:
+            link_form = self.get_link_existing_issue_form(request, group, event)
+
+        if op == 'create':
+            if create_form.is_valid():
+                try:
+                    issue_id = self.create_issue(
+                        group=group,
+                        form_data=create_form.cleaned_data,
+                        request=request,
+                    )
+                except forms.ValidationError as e:
+                    create_form.errors['__all__'] = [u'Error creating issue: %s' % e]
+
+            if create_form.is_valid():
+                GroupMeta.objects.set_value(group, '%s:tid' % prefix, issue_id)
+
+                issue_information = {
+                    'title': create_form.cleaned_data['title'],
+                    'provider': self.get_title(),
+                    'location': self.get_issue_url(group, issue_id),
+                    'label': self.get_issue_label(group=group, issue_id=issue_id),
+                }
+                Activity.objects.create(
+                    project=group.project,
                     group=group,
-                    form_data=form.cleaned_data,
-                    request=request,
+                    type=Activity.CREATE_ISSUE,
+                    user=request.user,
+                    data=issue_information,
                 )
-            except forms.ValidationError as e:
-                form.errors['__all__'] = [u'Error creating issue: %s' % e]
 
-        if form.is_valid():
-            GroupMeta.objects.set_value(group, '%s:tid' % prefix, issue_id)
+                issue_tracker_used.send(plugin=self, project=group.project, user=request.user, sender=IssueTrackingPlugin)
+                return self.redirect(group.get_absolute_url())
 
-            issue_information = {
-                'title': form.cleaned_data['title'],
-                'provider': self.get_title(),
-                'location': self.get_issue_url(group, issue_id),
-                'label': self.get_issue_label(group=group, issue_id=issue_id),
-            }
-            Activity.objects.create(
-                project=group.project,
-                group=group,
-                type=Activity.CREATE_ISSUE,
-                user=request.user,
-                data=issue_information,
-            )
-
-            issue_tracker_used.send(plugin=self, project=group.project, user=request.user, sender=IssueTrackingPlugin)
-            return self.redirect(group.get_absolute_url())
+        elif op == 'link':
+            if link_form.is_valid():
+                issue_id = link_form.cleaned_data['issue_id']
+                # TODO: add activity
+                GroupMeta.objects.set_value(group, '%s:tid' % prefix, issue_id)
+                return self.redirect(group.get_absolute_url())
 
         context = {
-            'form': form,
+            'create_form': create_form,
             'title': self.get_new_issue_title(),
+            'can_link_existing_issues': self.can_link_existing_issues,
+            'link_form': link_form,
+            'op': op
         }
 
         return self.render(self.create_issue_template, context)
