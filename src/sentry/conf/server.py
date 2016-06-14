@@ -620,6 +620,7 @@ SENTRY_FEATURES = {
     'organizations:create': True,
     'organizations:sso': True,
     'organizations:callsigns': False,
+    'organizations:new-tracebacks': False,
     'projects:global-events': False,
     'projects:quotas': True,
     'projects:plugins': True,
